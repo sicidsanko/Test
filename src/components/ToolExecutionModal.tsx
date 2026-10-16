@@ -20,11 +20,11 @@ import {
 } from 'lucide-react';
 import { ToolDefinition } from '../utils/pdfEngineLogic';
 import { LoadedFile } from '../types/pdf';
-import { createSamplePdf } from '../utils/samplePdfs';
 import { formatBytes, calculateCompressionEstimate, CompressionLevel } from '../utils/pdfEngineLogic';
 import {
   mergePdfs,
   splitPdf,
+  splitPdfMulti,
   removePages,
   rotatePdf,
   addWatermark,
@@ -56,7 +56,7 @@ import { CameraScannerModal } from './CameraScannerModal';
 interface ToolExecutionModalProps {
   tool: ToolDefinition | null;
   onClose: () => void;
-  onSaveToRecents: (fileName: string, size: number, pages: number, toolName: string) => void;
+  onSaveToRecents: (fileName: string, size: number, pages: number, toolName: string, pdfData?: Uint8Array) => void;
   onOpenInViewer: (url: string, name: string) => void;
 }
 
@@ -68,19 +68,16 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
 }) => {
   if (!tool) return null;
 
-  // Flow states: 1. Pick -> 2. Options -> 3. Processing -> 4. Result
   const [step, setStep] = useState<'picking' | 'options' | 'processing' | 'result'>('picking');
   const [files, setFiles] = useState<LoadedFile[]>([]);
   const [progress, setProgress] = useState<number>(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [processResult, setProcessResult] = useState<ProcessResult | null>(null);
 
-  // Modals inside execution
   const [isSigModalOpen, setIsSigModalOpen] = useState(false);
   const [signatureDataUrl, setSignatureDataUrl] = useState<string | null>(null);
   const [isScannerModalOpen, setIsScannerModalOpen] = useState(false);
 
-  // Tool-specific options state
   const [splitMode, setSplitMode] = useState<'ranges' | 'extract_all' | 'every_n'>('ranges');
   const [splitRanges, setSplitRanges] = useState('1-3');
   const [splitEveryN, setSplitEveryN] = useState(1);
@@ -94,45 +91,16 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
   const [pageNumberPos, setPageNumberPos] = useState<'bottom-center' | 'bottom-right' | 'bottom-left' | 'top-right'>('bottom-center');
   const [compressLevel, setCompressLevel] = useState<CompressionLevel>('recommended');
 
-  // Protect & Unlock
   const [passwordInput, setPasswordInput] = useState('');
-
-  // AI Options
   const [targetLang, setTargetLang] = useState('Spanish');
   const [aiTextResult, setAiTextResult] = useState<string | null>(null);
-
-  // Images to PDF
   const [imageFiles, setImageFiles] = useState<{ dataUrl: string; format: 'jpeg' | 'png' }[]>([]);
 
-  // Auto-trigger scanner if tool is scan_to_pdf
   useEffect(() => {
     if (tool.id === 'scan_to_pdf') {
       setIsScannerModalOpen(true);
     }
   }, [tool.id]);
-
-  // Load sample file helper
-  const handleLoadSample = async () => {
-    try {
-      setErrorMessage(null);
-      const sample = await createSamplePdf('Sample_Document_M3', 4);
-      setFiles([sample]);
-      setStep('options');
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Failed to load sample');
-    }
-  };
-
-  const handleAddSampleForMerge = async () => {
-    try {
-      const s1 = await createSamplePdf('Report_Alpha', 2, { r: 0.9, g: 0.2, b: 0.2 });
-      const s2 = await createSamplePdf('Financials_Beta', 3, { r: 0.15, g: 0.4, b: 0.9 });
-      setFiles([s1, s2]);
-      setStep('options');
-    } catch (err: any) {
-      setErrorMessage(err.message);
-    }
-  };
 
   const handleFileDrop = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const rawFiles = e.target.files;
@@ -174,7 +142,6 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
     }
   };
 
-  // Processing Execution Engine (100% Offline with local libraries)
   const executeProcessing = async () => {
     setStep('processing');
     setProgress(15);
@@ -189,13 +156,16 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
       const primaryFile = files[0];
 
       if (tool.id === 'merge') {
-        result = await mergePdfs(files, 'Merged_iLovePDF.pdf');
+        result = await mergePdfs(files);
       } else if (tool.id === 'split') {
-        result = await splitPdf(
+        const multiResults = await splitPdfMulti(
           primaryFile,
-          { mode: splitMode, rangeString: splitRanges, everyN: splitEveryN },
-          'Split_Document.pdf'
+          { mode: splitMode, rangeString: splitRanges, everyN: splitEveryN }
         );
+        for (const res of multiResults) {
+          onSaveToRecents(res.fileName, res.size, res.pageCount, tool.name, res.data);
+        }
+        result = multiResults[0];
       } else if (tool.id === 'remove_pages') {
         result = await removePages(primaryFile, [0], 'Pages_Removed.pdf');
       } else if (tool.id === 'extract_pages') {
@@ -228,7 +198,7 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
         }
         result = await convertImagesToPdf(imgs, 'Images_Converted.pdf');
       } else if (tool.id === 'word_to_pdf') {
-        const sourceData = primaryFile ? primaryFile.data : (await createSamplePdf('Sample', 2)).data;
+        const sourceData = primaryFile ? primaryFile.data : new Uint8Array();
         const buf = new Uint8Array(sourceData).buffer as ArrayBuffer;
         result = await convertDocxToPdf(buf, 'Word_Converted.pdf');
       } else if (tool.id === 'pdf_to_word') {
@@ -242,7 +212,7 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
           size: docxRes.data.byteLength,
         };
       } else if (tool.id === 'excel_to_pdf') {
-        const sourceData = primaryFile ? primaryFile.data : (await createSamplePdf('Sample', 1)).data;
+        const sourceData = primaryFile ? primaryFile.data : new Uint8Array();
         const buf = new Uint8Array(sourceData).buffer as ArrayBuffer;
         result = await convertExcelToPdf(buf, 'Spreadsheet_Converted.pdf');
       } else if (tool.id === 'pdf_to_excel') {
@@ -256,7 +226,7 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
           size: xlsxRes.data.byteLength,
         };
       } else if (tool.id === 'powerpoint_to_pdf') {
-        const sourceData = primaryFile ? primaryFile.data : (await createSamplePdf('Sample', 1)).data;
+        const sourceData = primaryFile ? primaryFile.data : new Uint8Array();
         const buf = new Uint8Array(sourceData).buffer as ArrayBuffer;
         result = await convertPptxToPdf(buf, 'Presentation_Converted.pdf');
       } else if (tool.id === 'pdf_to_powerpoint') {
@@ -350,7 +320,7 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
         setProcessResult(result);
         setStep('result');
         if (result) {
-          onSaveToRecents(result.fileName, result.size, result.pageCount, tool.name);
+          onSaveToRecents(result.fileName, result.size, result.pageCount, tool.name, result.data);
         }
       }, 400);
     } catch (err: any) {
@@ -429,27 +399,9 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
                     Tap to Select Document or Drop Files Here
                   </h3>
                   <p className="text-xs text-stone-500 mt-0.5">
-                    Supports PDF, Word (docx), Excel (xlsx), PowerPoint (pptx), and Images
+                    Supports PDF, Word (docx), Excel (xlsx), PowerPoint (pptx), and Images (No samples)
                   </p>
                 </div>
-              </div>
-
-              <div className="flex items-center justify-center space-x-3 pt-2">
-                <button
-                  onClick={handleLoadSample}
-                  className="px-4 py-2.5 rounded-2xl bg-red-50 dark:bg-red-950/60 text-red-700 dark:text-red-300 font-bold text-xs hover:bg-red-100 transition-colors shadow-xs flex items-center space-x-1.5 cursor-pointer"
-                >
-                  <Sparkles size={14} />
-                  <span>Use Sample PDF</span>
-                </button>
-                {tool.id === 'merge' && (
-                  <button
-                    onClick={handleAddSampleForMerge}
-                    className="px-4 py-2.5 rounded-2xl bg-stone-100 dark:bg-stone-800 text-stone-700 dark:text-stone-300 font-bold text-xs hover:bg-stone-200 transition-colors cursor-pointer"
-                  >
-                    Load 2 Merge Samples
-                  </button>
-                )}
               </div>
             </div>
           )}
@@ -457,7 +409,6 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
           {/* STEP 2: CONFIGURE OPTIONS */}
           {step === 'options' && (
             <div className="space-y-4">
-              {/* Selected Files Preview */}
               <div className="p-3 bg-stone-50 dark:bg-stone-800/60 rounded-2xl border border-stone-200 dark:border-stone-700 flex items-center justify-between">
                 <div className="flex items-center space-x-2.5 truncate">
                   <div className="w-9 h-9 rounded-xl bg-red-100 dark:bg-red-950 text-red-600 flex items-center justify-center shrink-0">
@@ -480,7 +431,6 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
                 </button>
               </div>
 
-              {/* Tool Specific Options UI */}
               {tool.id === 'split' && (
                 <div className="space-y-3">
                   <label className="text-xs font-bold text-stone-700 dark:text-stone-300">Split Mode</label>
@@ -506,7 +456,7 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
 
                   {splitMode === 'ranges' && (
                     <div>
-                      <label className="text-xs font-semibold text-stone-500">Page Ranges (e.g. 1-3, 5)</label>
+                      <label className="text-xs font-semibold text-stone-500">Page Ranges (e.g. 1-3, 4-6)</label>
                       <input
                         type="text"
                         value={splitRanges}
@@ -518,58 +468,13 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
                 </div>
               )}
 
-              {tool.id === 'rotate' && (
-                <div className="space-y-3">
-                  <label className="text-xs font-bold text-stone-700 dark:text-stone-300">Rotation Angle</label>
-                  <div className="grid grid-cols-3 gap-2">
-                    {[90, 180, 270].map(deg => (
-                      <button
-                        key={deg}
-                        onClick={() => setRotateAngle(deg as any)}
-                        className={`p-2 rounded-xl border text-xs font-bold cursor-pointer ${
-                          rotateAngle === deg ? 'border-red-600 bg-red-50 text-red-600' : 'border-stone-200'
-                        }`}
-                      >
-                        {deg}° Clockwise
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {tool.id === 'watermark' && (
-                <div className="space-y-3">
-                  <div>
-                    <label className="text-xs font-semibold text-stone-500">Watermark Text</label>
-                    <input
-                      type="text"
-                      value={watermarkText}
-                      onChange={e => setWatermarkText(e.target.value)}
-                      className="w-full mt-1 p-2.5 rounded-xl bg-stone-100 dark:bg-stone-800 border text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs font-semibold text-stone-500">Opacity ({Math.round(watermarkOpacity * 100)}%)</label>
-                    <input
-                      type="range"
-                      min="0.1"
-                      max="0.9"
-                      step="0.1"
-                      value={watermarkOpacity}
-                      onChange={e => setWatermarkOpacity(parseFloat(e.target.value))}
-                      className="w-full accent-red-600"
-                    />
-                  </div>
-                </div>
-              )}
-
               {tool.id === 'compress' && (
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-stone-700 dark:text-stone-300">Compression Level</label>
                   {[
-                    { id: 'low', label: 'Low Compression (Highest Quality)', size: '2.1 MB' },
-                    { id: 'recommended', label: 'Recommended Compression (Balanced)', size: '1.2 MB' },
-                    { id: 'extreme', label: 'Extreme Compression (Smallest Size)', size: '480 KB' },
+                    { id: 'low', label: 'Low Compression (Object Streams)', size: 'Fast re-save' },
+                    { id: 'recommended', label: 'Recommended Compression (150 DPI, JPEG 0.7)', size: 'Balanced' },
+                    { id: 'extreme', label: 'Extreme Compression (100 DPI, JPEG 0.5)', size: 'Smallest Size' },
                   ].map(lvl => (
                     <div
                       key={lvl.id}
@@ -580,7 +485,7 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
                     >
                       <div>
                         <h4 className="text-xs font-bold">{lvl.label}</h4>
-                        <p className="text-[10px] text-stone-500">Estimated output: {lvl.size}</p>
+                        <p className="text-[10px] text-stone-500">{lvl.size}</p>
                       </div>
                       <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${compressLevel === lvl.id ? 'border-red-600 bg-red-600 text-white' : 'border-stone-400'}`}>
                         {compressLevel === lvl.id && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
@@ -603,7 +508,6 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
                 </div>
               )}
 
-              {/* Execute Button */}
               <button
                 onClick={executeProcessing}
                 className="w-full py-3 rounded-2xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-lg flex items-center justify-center space-x-2 cursor-pointer mt-4"
@@ -655,7 +559,6 @@ export const ToolExecutionModal: React.FC<ToolExecutionModalProps> = ({
                 </div>
               )}
 
-              {/* Action Buttons */}
               <div className="grid grid-cols-2 gap-2.5 pt-2">
                 <button
                   onClick={handleDownload}

@@ -1,7 +1,7 @@
 import React from 'react';
-import { Home, Layers, Camera, Folder, Code2, Cpu } from 'lucide-react';
+import { Home, Layers, Camera, Folder } from 'lucide-react';
 
-export type ActiveTab = 'home' | 'tools' | 'scan' | 'files' | 'code' | 'arch';
+export type ActiveTab = 'home' | 'tools' | 'scan' | 'files';
 
 interface NavigationProps {
   activeTab: ActiveTab;
@@ -118,38 +118,6 @@ export const NavigationRailOrBar: React.FC<NavigationProps> = ({
               {filesCount}
             </span>
           )}
-        </button>
-
-        {/* 5. CAPACITOR & NATIVE CODE (Desktop Rail or subtle for developers) */}
-        <button
-          onClick={() => onTabChange('code')}
-          className={`hidden md:flex flex-col items-center justify-center p-1.5 rounded-2xl transition-all relative group cursor-pointer ${
-            activeTab === 'code'
-              ? 'text-red-600 dark:text-red-400 font-bold'
-              : 'text-stone-400 hover:text-stone-600 dark:hover:text-stone-300'
-          }`}
-          title="Capacitor 8 Android Code & Plugins"
-        >
-          <div className="w-11 h-7 rounded-full flex items-center justify-center group-hover:bg-stone-100 dark:group-hover:bg-stone-800">
-            <Code2 size={18} />
-          </div>
-          <span className="text-[9px] mt-0.5 text-center font-medium">Capacitor</span>
-        </button>
-
-        {/* 6. BUILD & CI WORKFLOW */}
-        <button
-          onClick={() => onTabChange('arch')}
-          className={`hidden md:flex flex-col items-center justify-center p-1.5 rounded-2xl transition-all relative group cursor-pointer ${
-            activeTab === 'arch'
-              ? 'text-red-600 dark:text-red-400 font-bold'
-              : 'text-stone-400 hover:text-stone-600 dark:hover:text-stone-300'
-          }`}
-          title="APK CI Workflow & Guide"
-        >
-          <div className="w-11 h-7 rounded-full flex items-center justify-center group-hover:bg-stone-100 dark:group-hover:bg-stone-800">
-            <Cpu size={18} />
-          </div>
-          <span className="text-[9px] mt-0.5 text-center font-medium">APK Build</span>
         </button>
       </div>
     </nav>

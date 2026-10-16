@@ -18,7 +18,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'npm'
 
       - name: Setup Java 21 (Temurin)
         uses: actions/setup-java@v4
@@ -28,10 +27,6 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Setup environment secrets
-        run: |
-          echo "VITE_ILOVEPDF_KEY=${{ secrets.VITE_ILOVEPDF_KEY }}" >> .env.local
 
       - name: Install dependencies
         run: npm install

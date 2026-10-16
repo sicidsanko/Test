@@ -29,12 +29,12 @@ interface MobiHomeScreenProps {
   documents: AppDocument[];
   onOpenDocument: (doc: AppDocument) => void;
   onOpenScanner: () => void;
-  onOpenEditor: () => void;
-  onOpenFillSign: () => void;
-  onOpenOcr: () => void;
-  onOpenOrganize: () => void;
+  onOpenEditor?: () => void;
+  onOpenFillSign?: () => void;
+  onOpenOcr?: () => void;
+  onOpenOrganize?: () => void;
   onOpenTools: () => void;
-  onLoadSample: () => void;
+  onLoadSample?: () => void;
   onToggleFavorite: (id: string) => void;
   onDeleteDocument: (id: string) => void;
   onRenameDocument: (id: string, newName: string) => void;

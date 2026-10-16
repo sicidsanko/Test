@@ -1,5 +1,5 @@
 import React from 'react';
-import { Smartphone, Monitor, Sun, Moon, Sparkles, FolderOpen, ShieldCheck, Code2, Cpu } from 'lucide-react';
+import { Smartphone, Monitor, Sun, Moon, FolderOpen, ShieldCheck } from 'lucide-react';
 import { ActiveTab } from './NavigationRailOrBar';
 
 interface TopAppBarProps {
@@ -7,7 +7,6 @@ interface TopAppBarProps {
   onToggleSimulator: () => void;
   isDark: boolean;
   onToggleDark: () => void;
-  onLoadSample: () => void;
   onPickLocalFile: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onSelectTab?: (tab: ActiveTab) => void;
 }
@@ -17,9 +16,7 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
   onToggleSimulator,
   isDark,
   onToggleDark,
-  onLoadSample,
   onPickLocalFile,
-  onSelectTab,
 }) => {
   return (
     <header className="px-4 py-2.5 bg-white dark:bg-stone-900 border-b border-stone-200 dark:border-stone-800 flex items-center justify-between shrink-0 transition-colors z-20">
@@ -42,36 +39,6 @@ export const TopAppBar: React.FC<TopAppBarProps> = ({
       </div>
 
       <div className="flex items-center space-x-1 sm:space-x-1.5">
-        {/* Developer Capacitor & CI Quick Links */}
-        {onSelectTab && (
-          <div className="flex md:hidden items-center space-x-1">
-            <button
-              onClick={() => onSelectTab('code')}
-              className="p-1.5 rounded-xl text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-200 hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors cursor-pointer"
-              title="Capacitor 8 Android Code"
-            >
-              <Code2 size={16} />
-            </button>
-            <button
-              onClick={() => onSelectTab('arch')}
-              className="p-1.5 rounded-xl text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-200 hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors cursor-pointer"
-              title="GitHub APK CI Workflow"
-            >
-              <Cpu size={16} />
-            </button>
-          </div>
-        )}
-
-        {/* Quick Sample Button */}
-        <button
-          onClick={onLoadSample}
-          className="hidden sm:inline-flex items-center space-x-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-red-50 text-red-700 dark:bg-red-950/60 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/60 transition-colors cursor-pointer"
-          title="Load prebuilt sample PDF for instant testing"
-        >
-          <Sparkles size={13} />
-          <span>Demo PDF</span>
-        </button>
-
         {/* SAF File Upload Input */}
         <label className="inline-flex items-center space-x-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-stone-100 text-stone-700 dark:bg-stone-800 dark:text-stone-200 hover:bg-stone-200 dark:hover:bg-stone-700 transition-colors cursor-pointer">
           <FolderOpen size={13} />

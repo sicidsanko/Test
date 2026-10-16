@@ -1,15 +1,28 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
-import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
+import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import { Preferences } from '@capacitor/preferences';
-import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { FileOpener } from '@capacitor-community/file-opener';
+import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import JSZip from 'jszip';
 import { AppDocument } from '../types/pdf';
 
 export const isNative = Capacitor.isNativePlatform();
 
-// Native Plugin Interfaces
+export async function pickPhotoFromGallery(): Promise<string | null> {
+  try {
+    const image = await Camera.getPhoto({
+      quality: 90,
+      allowEditing: false,
+      resultType: CameraResultType.DataUrl,
+      source: CameraSource.Photos,
+    });
+    return image.dataUrl || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 interface DocumentScannerPluginInterface {
   scanDocument(options?: { pageLimit?: number; galleryImport?: boolean }): Promise<{
     pages?: string[];
@@ -26,8 +39,7 @@ const DocumentScanner = registerPlugin<DocumentScannerPluginInterface>('Document
 const NativePrint = registerPlugin<PrintPluginInterface>('NativePrint');
 
 /**
- * Scan documents using Google ML Kit Document Scanner on Android.
- * Returns scanned page image URIs and/or compiled PDF URI.
+ * Scan documents using Google ML Kit Document Scanner on Android or Web fallback.
  */
 export async function scanWithMlKit(pageLimit: number = 20): Promise<{
   pages: string[];
@@ -41,7 +53,7 @@ export async function scanWithMlKit(pageLimit: number = 20): Promise<{
         galleryImport: true,
       });
       return {
-        pages: result.pages || [],
+        pages: (result.pages || []).map(p => Capacitor.convertFileSrc(p)),
         pdfUri: result.pdfUri,
         pageCount: result.pageCount || (result.pages ? result.pages.length : 0),
       };
@@ -69,7 +81,6 @@ export async function printPdfDocument(fileUriOrBlobUrl: string, jobName: string
     }
   }
 
-  // Web print fallback
   const iframe = document.createElement('iframe');
   iframe.style.position = 'fixed';
   iframe.style.right = '0';
@@ -88,55 +99,79 @@ export async function printPdfDocument(fileUriOrBlobUrl: string, jobName: string
 }
 
 /**
- * Save binary PDF data to device storage (Documents directory on Android).
+ * Write binary PDF data to private app storage (Directory.Data, folder "docs/").
  */
-export async function savePdfToDevice(
+export async function savePdfToAppStorage(
   data: Uint8Array,
   fileName: string
-): Promise<{ uri: string; path: string }> {
+): Promise<{ path: string; uri: string }> {
   let binary = '';
   const len = data.byteLength;
   for (let i = 0; i < len; i++) {
     binary += String.fromCharCode(data[i]);
   }
   const base64Data = btoa(binary);
+  const filePath = `docs/${fileName}`;
 
-  if (isNative) {
-    try {
-      const result = await Filesystem.writeFile({
-        path: fileName,
-        data: base64Data,
-        directory: Directory.Documents,
-        recursive: true,
-      });
+  try {
+    const result = await Filesystem.writeFile({
+      path: filePath,
+      data: base64Data,
+      directory: Directory.Data,
+      recursive: true,
+    });
 
-      return {
-        uri: result.uri,
-        path: fileName,
-      };
-    } catch (e) {
-      const cacheResult = await Filesystem.writeFile({
-        path: fileName,
-        data: base64Data,
-        directory: Directory.Cache,
+    return {
+      path: filePath,
+      uri: result.uri,
+    };
+  } catch (e) {
+    const cacheResult = await Filesystem.writeFile({
+      path: fileName,
+      data: base64Data,
+      directory: Directory.Cache,
+    });
+    return {
+      path: fileName,
+      uri: cacheResult.uri,
+    };
+  }
+}
+
+// Backward compatibility alias
+export const savePdfToDevice = savePdfToAppStorage;
+
+/**
+ * Read PDF bytes back with Filesystem.readFile. If missing, throws error.
+ */
+export async function readPdfBytesFromStorage(docPath: string): Promise<Uint8Array> {
+  try {
+    let readResult;
+    if (docPath.startsWith('file://') || docPath.startsWith('content://') || docPath.startsWith('/')) {
+      readResult = await Filesystem.readFile({
+        path: docPath,
       });
-      return {
-        uri: cacheResult.uri,
-        path: fileName,
-      };
+    } else {
+      readResult = await Filesystem.readFile({
+        path: docPath,
+        directory: Directory.Data,
+      });
     }
-  } else {
-    // Browser download
-    const blob = new Blob([data as unknown as BlobPart], { type: 'application/pdf' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    return { uri: url, path: fileName };
+
+    const base64 = readResult.data;
+    if (typeof base64 !== 'string') {
+      throw new Error('Invalid file data');
+    }
+
+    const binaryString = atob(base64);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  } catch (err) {
+    throw new Error(`PDF file not found in storage: ${docPath}`);
   }
 }
 
@@ -152,7 +187,7 @@ export async function sharePdf(
     try {
       let targetUri = fileUriOrBlobUrl;
       if (!targetUri.startsWith('file://') && !targetUri.startsWith('content://') && data) {
-        const saved = await savePdfToDevice(data, fileName);
+        const saved = await savePdfToAppStorage(data, fileName);
         targetUri = saved.uri;
       }
 
@@ -169,7 +204,6 @@ export async function sharePdf(
     }
   }
 
-  // Web Share fallback
   if (navigator.share) {
     try {
       if (data) {
@@ -197,7 +231,7 @@ export async function sharePdf(
 }
 
 /**
- * Open PDF in native external reader using @capacitor-community/file-opener.
+ * Open PDF in native external reader.
  */
 export async function openWithExternalReader(fileUri: string): Promise<boolean> {
   if (isNative) {
@@ -215,43 +249,8 @@ export async function openWithExternalReader(fileUri: string): Promise<boolean> 
   return false;
 }
 
-/**
- * Capture photo via Capacitor Camera plugin.
- */
-export async function capturePhotoFromCamera(): Promise<string | null> {
-  try {
-    const image = await Camera.getPhoto({
-      quality: 90,
-      allowEditing: false,
-      resultType: CameraResultType.DataUrl,
-      source: CameraSource.Camera,
-    });
-    return image.dataUrl || null;
-  } catch (e) {
-    console.warn('Camera capture cancelled or failed:', e);
-    return null;
-  }
-}
-
-/**
- * Pick image from device gallery via Capacitor Camera.
- */
-export async function pickPhotoFromGallery(): Promise<string | null> {
-  try {
-    const image = await Camera.getPhoto({
-      quality: 90,
-      allowEditing: false,
-      resultType: CameraResultType.DataUrl,
-      source: CameraSource.Photos,
-    });
-    return image.dataUrl || null;
-  } catch (e) {
-    return null;
-  }
-}
-
 // -------------------------------------------------------------
-// DOCUMENT LIST & FOLDER STORAGE (Preferences + Filesystem)
+// DOCUMENT LIST & FOLDER STORAGE (Preferences)
 // -------------------------------------------------------------
 
 const STORAGE_KEY_DOCS = 'mobipdf_saved_documents';
@@ -327,15 +326,13 @@ export async function addFolder(folderName: string): Promise<string[]> {
   return folders;
 }
 
-// -------------------------------------------------------------
-// BACKUP & RESTORE (ZIP Export / Import)
-// -------------------------------------------------------------
-
+/**
+ * Export all documents to Zip backup.
+ */
 export async function exportAllDocumentsToZip(): Promise<Blob> {
   const docs = await loadStoredDocuments();
   const zip = new JSZip();
 
-  // Add manifest
   zip.file(
     'manifest.json',
     JSON.stringify(
@@ -350,17 +347,10 @@ export async function exportAllDocumentsToZip(): Promise<Blob> {
     )
   );
 
-  // Pack each document
   for (const doc of docs) {
     try {
-      if (isNative && doc.path.startsWith('file://')) {
-        const fileContent = await Filesystem.readFile({ path: doc.name, directory: Directory.Documents });
-        zip.file(doc.name, fileContent.data, { base64: true });
-      } else if (doc.path.startsWith('blob:') || doc.path.startsWith('data:')) {
-        const res = await fetch(doc.path);
-        const buffer = await res.arrayBuffer();
-        zip.file(doc.name, buffer);
-      }
+      const bytes = await readPdfBytesFromStorage(doc.path);
+      zip.file(doc.name, bytes);
     } catch (err) {
       console.warn(`Could not add ${doc.name} to zip:`, err);
     }

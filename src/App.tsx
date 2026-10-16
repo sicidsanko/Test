@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { NavigationRailOrBar, ActiveTab } from './components/NavigationRailOrBar';
-import { AndroidPhoneFrame } from './components/AndroidPhoneFrame';
 import { TopAppBar } from './components/TopAppBar';
 import { MobiHomeScreen } from './components/MobiHomeScreen';
 import { ToolGrid } from './components/ToolGrid';
@@ -9,14 +8,9 @@ import { MobiScannerScreen, ScannerMode } from './components/MobiScannerScreen';
 import { MobiPdfReader } from './components/MobiPdfReader';
 import { FillAndSignModal } from './components/FillAndSignModal';
 import { OrganizePagesModal } from './components/OrganizePagesModal';
-import { PdfEditorModal } from './components/PdfEditorModal';
-import { OcrTextModal } from './components/OcrTextModal';
 import { ToolExecutionModal } from './components/ToolExecutionModal';
-import { AndroidCodeHub } from './components/AndroidCodeHub';
-import { ArchitectureGuide } from './components/ArchitectureGuide';
-import { ToolDefinition, TOOLS } from './utils/pdfEngineLogic';
+import { ToolDefinition } from './utils/pdfEngineLogic';
 import { AppDocument, LoadedFile, RecentFileRecord } from './types/pdf';
-import { createSamplePdf } from './utils/samplePdfs';
 import { ProcessResult } from './utils/pdfProcessor';
 import {
   loadStoredDocuments,
@@ -27,7 +21,10 @@ import {
   moveDocumentToFolder,
   loadFolders,
   addFolder,
-  savePdfToDevice,
+  savePdfToAppStorage,
+  readPdfBytesFromStorage,
+  scanWithMlKit,
+  isNative,
 } from './utils/capacitorBridge';
 
 export default function App() {
@@ -35,7 +32,7 @@ export default function App() {
   const [isSimulatorMode, setIsSimulatorMode] = useState<boolean>(false);
   const [isDark, setIsDark] = useState<boolean>(false);
 
-  // App Documents state (persisted via Preferences / localStorage)
+  // App Documents state
   const [documents, setDocuments] = useState<AppDocument[]>([]);
   const [folders, setFolders] = useState<string[]>(['Scans', 'Receipts', 'Contracts', 'Personal']);
 
@@ -44,51 +41,15 @@ export default function App() {
   const [readerDoc, setReaderDoc] = useState<{ data: Uint8Array; fileName: string } | null>(null);
   const [fillSignFile, setFillSignFile] = useState<LoadedFile | null>(null);
   const [organizeFile, setOrganizeFile] = useState<LoadedFile | null>(null);
-  const [editorFile, setEditorFile] = useState<LoadedFile | null>(null);
-  const [ocrDoc, setOcrDoc] = useState<{ data: Uint8Array; fileName: string } | null>(null);
   const [selectedTool, setSelectedTool] = useState<ToolDefinition | null>(null);
 
-  // Initialize and load saved documents & folders on mount
+  // Initialize and load saved documents & folders on mount (No samples / no seed docs)
   useEffect(() => {
     async function initStorage() {
       const storedDocs = await loadStoredDocuments();
       const storedFolders = await loadFolders();
       setFolders(storedFolders);
-
-      if (storedDocs.length > 0) {
-        setDocuments(storedDocs);
-      } else {
-        // Seed initial high-quality documents so the user has immediate data
-        const sample1 = await createSamplePdf('Contract_Agreement_2026', 4);
-        const sample2 = await createSamplePdf('Vendor_Invoice_Q1', 2);
-
-        const seed1: AppDocument = {
-          id: 'doc-seed-1',
-          name: sample1.name,
-          path: sample1.previewUrl || '',
-          size: sample1.size,
-          date: Date.now() - 3600000 * 3,
-          pageCount: 4,
-          folder: 'Contracts',
-          isFavorite: true,
-        };
-
-        const seed2: AppDocument = {
-          id: 'doc-seed-2',
-          name: sample2.name,
-          path: sample2.previewUrl || '',
-          size: sample2.size,
-          date: Date.now() - 3600000 * 24,
-          pageCount: 2,
-          folder: 'Receipts',
-          isFavorite: false,
-        };
-
-        const initialDocs = [seed1, seed2];
-        setDocuments(initialDocs);
-        await saveStoredDocument(seed1);
-        await saveStoredDocument(seed2);
-      }
+      setDocuments(storedDocs);
     }
     initStorage();
   }, []);
@@ -102,24 +63,6 @@ export default function App() {
     }
   }, [isDark]);
 
-  // Load a fresh sample PDF
-  const handleLoadSampleTop = async () => {
-    const sample = await createSamplePdf(`Sample_Document_${Date.now().toString().slice(-4)}`, 3);
-    const newDoc: AppDocument = {
-      id: `doc-${Date.now()}`,
-      name: sample.name,
-      path: sample.previewUrl || '',
-      size: sample.size,
-      date: Date.now(),
-      pageCount: 3,
-      folder: 'Contracts',
-      isFavorite: false,
-    };
-    await saveStoredDocument(newDoc);
-    setDocuments(prev => [newDoc, ...prev]);
-    setReaderDoc({ data: sample.data, fileName: sample.name });
-  };
-
   // Open file picked from local device
   const handlePickLocalFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -127,13 +70,13 @@ export default function App() {
     const file = files[0];
     const buffer = await file.arrayBuffer();
     const data = new Uint8Array(buffer);
-    const blob = new Blob([data as unknown as BlobPart], { type: file.type || 'application/pdf' });
-    const previewUrl = URL.createObjectURL(blob);
+
+    const saved = await savePdfToAppStorage(data, file.name);
 
     const newDoc: AppDocument = {
       id: `doc-${Date.now()}`,
       name: file.name,
-      path: previewUrl,
+      path: saved.path,
       size: file.size,
       date: Date.now(),
       pageCount: 1,
@@ -146,21 +89,14 @@ export default function App() {
     setReaderDoc({ data, fileName: file.name });
   };
 
-  // Document management handlers
+  // Document management handlers (Reading real bytes from storage. If missing, show error, never sample)
   const handleOpenDocument = async (doc: AppDocument) => {
     try {
-      if (doc.path.startsWith('blob:') || doc.path.startsWith('data:')) {
-        const res = await fetch(doc.path);
-        const buffer = await res.arrayBuffer();
-        setReaderDoc({ data: new Uint8Array(buffer), fileName: doc.name });
-      } else {
-        // Fallback create sample with that name if memory object url expired
-        const sample = await createSamplePdf(doc.name.replace(/\.pdf$/, ''), doc.pageCount || 2);
-        setReaderDoc({ data: sample.data, fileName: doc.name });
-      }
+      const data = await readPdfBytesFromStorage(doc.path);
+      setReaderDoc({ data, fileName: doc.name });
     } catch (e) {
-      const sample = await createSamplePdf(doc.name.replace(/\.pdf$/, ''), 2);
-      setReaderDoc({ data: sample.data, fileName: doc.name });
+      alert(`Error: Document file not found in storage for "${doc.name}".`);
+      console.error(e);
     }
   };
 
@@ -189,13 +125,15 @@ export default function App() {
     setFolders(updated);
   };
 
-  // Scanner completed
+  // Scanner completed (ML Kit or fallback)
   const handleScanComplete = async (result: ProcessResult, mode: ScannerMode) => {
     setIsScannerOpen(false);
+    const saved = await savePdfToAppStorage(result.data, result.fileName);
+
     const newDoc: AppDocument = {
       id: `scan-${Date.now()}`,
       name: result.fileName,
-      path: result.previewUrl,
+      path: saved.path,
       size: result.size,
       date: Date.now(),
       pageCount: result.pageCount,
@@ -207,8 +145,8 @@ export default function App() {
     setReaderDoc({ data: result.data, fileName: result.fileName });
   };
 
-  // Helper to open active document in tools
-  const getActiveOrSampleFile = async (): Promise<LoadedFile> => {
+  // Helper to get active file or prompt user to pick one when none is open
+  const getActiveOrPromptFile = async (): Promise<LoadedFile> => {
     if (readerDoc) {
       const blob = new Blob([readerDoc.data as unknown as BlobPart], { type: 'application/pdf' });
       return {
@@ -220,60 +158,89 @@ export default function App() {
         previewUrl: URL.createObjectURL(blob),
       };
     }
-    const sample = await createSamplePdf('Contract_Agreement_2026', 3);
-    return sample;
+
+    if (documents.length > 0) {
+      const doc = documents[0];
+      const data = await readPdfBytesFromStorage(doc.path);
+      const blob = new Blob([data as unknown as BlobPart], { type: 'application/pdf' });
+      return {
+        id: doc.id,
+        name: doc.name,
+        size: doc.size,
+        type: 'application/pdf',
+        data,
+        previewUrl: URL.createObjectURL(blob),
+      };
+    }
+
+    throw new Error('No document is currently open. Please open a PDF or select a file from your Files list first.');
   };
 
   const handleOpenFillSign = async () => {
-    const file = await getActiveOrSampleFile();
-    setFillSignFile(file);
+    try {
+      const file = await getActiveOrPromptFile();
+      setFillSignFile(file);
+    } catch (err: any) {
+      alert(err.message || 'Please open a document first.');
+      setActiveTab('files');
+    }
   };
 
   const handleOpenOrganize = async () => {
-    const file = await getActiveOrSampleFile();
-    setOrganizeFile(file);
-  };
-
-  const handleOpenEditor = async () => {
-    const file = readerDoc ? await getActiveOrSampleFile() : null;
-    setEditorFile(file);
-  };
-
-  const handleOpenOcr = async () => {
-    if (readerDoc) {
-      setOcrDoc(readerDoc);
-    } else {
-      const sample = await createSamplePdf('Scanned_Tax_Form_2026', 2);
-      setOcrDoc({ data: sample.data, fileName: sample.name });
+    try {
+      const file = await getActiveOrPromptFile();
+      setOrganizeFile(file);
+    } catch (err: any) {
+      alert(err.message || 'Please open a document first.');
+      setActiveTab('files');
     }
   };
 
-  // Tool selection handler from ToolGrid
+  // Tool selection handler from ToolGrid (Version 1 Only tools)
   const handleSelectTool = async (tool: ToolDefinition) => {
-    if (tool.id === 'scan') {
+    if (tool.id === 'scan_to_pdf') {
+      if (isNative) {
+        const scanRes = await scanWithMlKit();
+        if (scanRes && scanRes.pdfUri) {
+          try {
+            const pdfBytes = await readPdfBytesFromStorage(scanRes.pdfUri);
+            const fileName = `Scan_${Date.now()}.pdf`;
+            const saved = await savePdfToAppStorage(pdfBytes, fileName);
+            const newDoc: AppDocument = {
+              id: `scan-${Date.now()}`,
+              name: fileName,
+              path: saved.path,
+              size: pdfBytes.byteLength,
+              date: Date.now(),
+              pageCount: scanRes.pageCount,
+              folder: 'Scans',
+              isFavorite: false,
+            };
+            await saveStoredDocument(newDoc);
+            setDocuments(prev => [newDoc, ...prev]);
+            setReaderDoc({ data: pdfBytes, fileName });
+            return;
+          } catch (e) {
+            console.warn('Failed to read scanned PDF uri, opening scanner modal:', e);
+          }
+        }
+      }
       setIsScannerOpen(true);
       return;
     }
+
     if (tool.id === 'sign') {
       await handleOpenFillSign();
       return;
     }
-    if (tool.id === 'organize') {
+    if (tool.id === 'organize_pages') {
       await handleOpenOrganize();
       return;
     }
-    if (tool.id === 'edit') {
-      await handleOpenEditor();
-      return;
-    }
-    if (tool.id === 'ocr') {
-      await handleOpenOcr();
-      return;
-    }
+
     setSelectedTool(tool);
   };
 
-  // Convert documents to RecentFileRecord for tools modal
   const recentFilesRecords: RecentFileRecord[] = documents.map(d => ({
     id: d.id,
     name: d.name,
@@ -284,28 +251,32 @@ export default function App() {
     favorite: d.isFavorite,
   }));
 
-  const handleSaveToRecents = (
+  const handleSaveToRecents = async (
     fileName: string,
     size: number,
     pages: number,
-    toolName: string
+    toolName: string,
+    pdfData?: Uint8Array
   ) => {
+    let path = '';
+    if (pdfData) {
+      const saved = await savePdfToAppStorage(pdfData, fileName);
+      path = saved.path;
+    }
     const newDoc: AppDocument = {
       id: `doc-${Date.now()}`,
       name: fileName,
-      path: '',
+      path,
       size,
       date: Date.now(),
       pageCount: pages,
       folder: 'Scans',
       isFavorite: false,
     };
-    saveStoredDocument(newDoc).then(() => {
-      setDocuments(prev => [newDoc, ...prev]);
-    });
+    await saveStoredDocument(newDoc);
+    setDocuments(prev => [newDoc, ...prev]);
   };
 
-  // Content switcher inside the Android Frame
   const renderTabContent = () => {
     switch (activeTab) {
       case 'home':
@@ -313,13 +284,37 @@ export default function App() {
           <MobiHomeScreen
             documents={documents}
             onOpenDocument={handleOpenDocument}
-            onOpenScanner={() => setIsScannerOpen(true)}
-            onOpenEditor={handleOpenEditor}
-            onOpenFillSign={handleOpenFillSign}
-            onOpenOcr={handleOpenOcr}
-            onOpenOrganize={handleOpenOrganize}
+            onOpenScanner={() => {
+              if (isNative) {
+                scanWithMlKit().then(async scanRes => {
+                  if (scanRes && scanRes.pdfUri) {
+                    try {
+                      const pdfBytes = await readPdfBytesFromStorage(scanRes.pdfUri);
+                      const fileName = `Scan_${Date.now()}.pdf`;
+                      const saved = await savePdfToAppStorage(pdfBytes, fileName);
+                      const newDoc: AppDocument = {
+                        id: `scan-${Date.now()}`,
+                        name: fileName,
+                        path: saved.path,
+                        size: pdfBytes.byteLength,
+                        date: Date.now(),
+                        pageCount: scanRes.pageCount,
+                        folder: 'Scans',
+                        isFavorite: false,
+                      };
+                      await saveStoredDocument(newDoc);
+                      setDocuments(prev => [newDoc, ...prev]);
+                      setReaderDoc({ data: pdfBytes, fileName });
+                      return;
+                    } catch (e) {}
+                  }
+                  setIsScannerOpen(true);
+                });
+              } else {
+                setIsScannerOpen(true);
+              }
+            }}
             onOpenTools={() => setActiveTab('tools')}
-            onLoadSample={handleLoadSampleTop}
             onToggleFavorite={handleToggleFavorite}
             onDeleteDocument={handleDeleteDocument}
             onRenameDocument={handleRenameDocument}
@@ -334,22 +329,23 @@ export default function App() {
               const doc = documents.find(d => d.name === file.name);
               if (doc) handleOpenDocument(doc);
             }}
-            onOpenViewer={() => handleLoadSampleTop()}
+            onOpenViewer={() => {
+              if (documents.length > 0) {
+                handleOpenDocument(documents[0]);
+              } else {
+                alert('No documents available. Please pick a file or scan one first.');
+                setActiveTab('files');
+              }
+            }}
           />
         );
       case 'scan':
-        // Trigger scanner modal immediately, tab points to home behind it
         return (
           <MobiHomeScreen
             documents={documents}
             onOpenDocument={handleOpenDocument}
             onOpenScanner={() => setIsScannerOpen(true)}
-            onOpenEditor={handleOpenEditor}
-            onOpenFillSign={handleOpenFillSign}
-            onOpenOcr={handleOpenOcr}
-            onOpenOrganize={handleOpenOrganize}
             onOpenTools={() => setActiveTab('tools')}
-            onLoadSample={handleLoadSampleTop}
             onToggleFavorite={handleToggleFavorite}
             onDeleteDocument={handleDeleteDocument}
             onRenameDocument={handleRenameDocument}
@@ -368,10 +364,6 @@ export default function App() {
             onCreateFolder={handleCreateFolder}
           />
         );
-      case 'code':
-        return <AndroidCodeHub />;
-      case 'arch':
-        return <ArchitectureGuide />;
       default:
         return null;
     }
@@ -379,50 +371,65 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen bg-stone-100 dark:bg-stone-950 text-stone-900 dark:text-stone-100 overflow-hidden font-sans">
-      {/* Phone Simulator or Desktop Responsive container */}
-      <AndroidPhoneFrame
-        isSimulatorMode={isSimulatorMode}
-        onToggleSimulator={() => setIsSimulatorMode(!isSimulatorMode)}
-        isDark={isDark}
-      >
-        <div className="flex flex-col md:flex-row flex-1 h-full overflow-hidden">
-          {/* Main App Content View */}
-          <div className="order-1 flex-1 flex flex-col h-full overflow-hidden">
-            {/* Top Bar */}
-            <TopAppBar
-              isSimulatorMode={isSimulatorMode}
-              onToggleSimulator={() => setIsSimulatorMode(!isSimulatorMode)}
-              isDark={isDark}
-              onToggleDark={() => setIsDark(!isDark)}
-              onLoadSample={handleLoadSampleTop}
-              onPickLocalFile={handlePickLocalFile}
-              onSelectTab={tab => setActiveTab(tab)}
-            />
+      <div className="flex flex-col md:flex-row flex-1 h-full overflow-hidden w-full">
+        <div className="order-1 flex-1 flex flex-col h-full overflow-hidden">
+          <TopAppBar
+            isSimulatorMode={isSimulatorMode}
+            onToggleSimulator={() => setIsSimulatorMode(!isSimulatorMode)}
+            isDark={isDark}
+            onToggleDark={() => setIsDark(!isDark)}
+            onPickLocalFile={handlePickLocalFile}
+            onSelectTab={tab => setActiveTab(tab)}
+          />
 
-            {/* Main Interactive Screen */}
-            <main className="flex-1 flex flex-col overflow-hidden relative">
-              {renderTabContent()}
-            </main>
-          </div>
-
-          {/* Navigation Bar / Rail */}
-          <div className="order-2 shrink-0">
-            <NavigationRailOrBar
-              activeTab={activeTab}
-              onTabChange={tab => {
-                if (tab === 'scan') {
-                  setIsScannerOpen(true);
-                } else {
-                  setActiveTab(tab);
-                }
-              }}
-              filesCount={documents.length}
-            />
-          </div>
+          <main className="flex-1 flex flex-col overflow-hidden relative">
+            {renderTabContent()}
+          </main>
         </div>
-      </AndroidPhoneFrame>
 
-      {/* 1. Fullscreen Mobi Scanner Screen */}
+        <div className="order-2 shrink-0">
+          <NavigationRailOrBar
+            activeTab={activeTab}
+            onTabChange={tab => {
+              if (tab === 'scan') {
+                if (isNative) {
+                  scanWithMlKit().then(async scanRes => {
+                    if (scanRes && scanRes.pdfUri) {
+                      try {
+                        const pdfBytes = await readPdfBytesFromStorage(scanRes.pdfUri);
+                        const fileName = `Scan_${Date.now()}.pdf`;
+                        const saved = await savePdfToAppStorage(pdfBytes, fileName);
+                        const newDoc: AppDocument = {
+                          id: `scan-${Date.now()}`,
+                          name: fileName,
+                          path: saved.path,
+                          size: pdfBytes.byteLength,
+                          date: Date.now(),
+                          pageCount: scanRes.pageCount,
+                          folder: 'Scans',
+                          isFavorite: false,
+                        };
+                        await saveStoredDocument(newDoc);
+                        setDocuments(prev => [newDoc, ...prev]);
+                        setReaderDoc({ data: pdfBytes, fileName });
+                        return;
+                      } catch (e) {}
+                    }
+                    setIsScannerOpen(true);
+                  });
+                } else {
+                  setIsScannerOpen(true);
+                }
+              } else {
+                setActiveTab(tab);
+              }
+            }}
+            filesCount={documents.length}
+          />
+        </div>
+      </div>
+
+      {/* 1. Fullscreen Scanner Screen */}
       {isScannerOpen && (
         <MobiScannerScreen
           onScanComplete={handleScanComplete}
@@ -430,18 +437,18 @@ export default function App() {
         />
       )}
 
-      {/* 2. Fullscreen Mobi PDF Reader & Annotator */}
+      {/* 2. Fullscreen PDF Reader (Version 1 Only: no editor, OCR, print buttons) */}
       {readerDoc && (
         <MobiPdfReader
           pdfData={readerDoc.data}
           fileName={readerDoc.fileName}
           onClose={() => setReaderDoc(null)}
           onSaveAnnotatedPdf={async (updatedData, fileName) => {
-            const saved = await savePdfToDevice(updatedData, fileName);
+            const saved = await savePdfToAppStorage(updatedData, fileName);
             const updatedDoc: AppDocument = {
               id: `annot-${Date.now()}`,
               name: fileName,
-              path: saved.uri,
+              path: saved.path,
               size: updatedData.byteLength,
               date: Date.now(),
               pageCount: 3,
@@ -451,10 +458,8 @@ export default function App() {
             await saveStoredDocument(updatedDoc);
             setDocuments(prev => [updatedDoc, ...prev.filter(d => d.name !== fileName)]);
           }}
-          onOpenEditor={() => handleOpenEditor()}
           onOpenFillSign={() => handleOpenFillSign()}
           onOpenOrganize={() => handleOpenOrganize()}
-          onOpenOcr={() => handleOpenOcr()}
         />
       )}
 
@@ -465,11 +470,11 @@ export default function App() {
           onClose={() => setFillSignFile(null)}
           onSaveSignedPdf={async (data, fileName) => {
             setFillSignFile(null);
-            const saved = await savePdfToDevice(data, fileName);
+            const saved = await savePdfToAppStorage(data, fileName);
             const doc: AppDocument = {
               id: `signed-${Date.now()}`,
               name: fileName,
-              path: saved.uri,
+              path: saved.path,
               size: data.byteLength,
               date: Date.now(),
               pageCount: 1,
@@ -490,11 +495,11 @@ export default function App() {
           onClose={() => setOrganizeFile(null)}
           onSaveOrganizedPdf={async (data, fileName) => {
             setOrganizeFile(null);
-            const saved = await savePdfToDevice(data, fileName);
+            const saved = await savePdfToAppStorage(data, fileName);
             const doc: AppDocument = {
               id: `org-${Date.now()}`,
               name: fileName,
-              path: saved.uri,
+              path: saved.path,
               size: data.byteLength,
               date: Date.now(),
               pageCount: 2,
@@ -508,54 +513,20 @@ export default function App() {
         />
       )}
 
-      {/* 5. PDF Editor Modal */}
-      {editorFile !== undefined && editorFile !== null && (
-        <PdfEditorModal
-          file={editorFile}
-          onClose={() => setEditorFile(null)}
-          onSaveEditedPdf={async (data, fileName) => {
-            setEditorFile(null);
-            const saved = await savePdfToDevice(data, fileName);
-            const doc: AppDocument = {
-              id: `edit-${Date.now()}`,
-              name: fileName,
-              path: saved.uri,
-              size: data.byteLength,
-              date: Date.now(),
-              pageCount: 1,
-              folder: 'Scans',
-              isFavorite: false,
-            };
-            await saveStoredDocument(doc);
-            setDocuments(prev => [doc, ...prev]);
-            setReaderDoc({ data, fileName });
-          }}
-        />
-      )}
-
-      {/* 6. OCR Text Modal */}
-      {ocrDoc && (
-        <OcrTextModal
-          pdfBytes={ocrDoc.data}
-          fileName={ocrDoc.fileName}
-          onClose={() => setOcrDoc(null)}
-        />
-      )}
-
-      {/* 7. General Tool Execution Modal (for 25+ PDF Tools) */}
+      {/* 5. Tool Execution Modal */}
       <ToolExecutionModal
         tool={selectedTool}
         onClose={() => setSelectedTool(null)}
-        onSaveToRecents={handleSaveToRecents}
+        onSaveToRecents={(name, size, pages, toolName, pdfData) => handleSaveToRecents(name, size, pages, toolName, pdfData)}
         onOpenInViewer={async (url, name) => {
           setSelectedTool(null);
           try {
             const res = await fetch(url);
             const buffer = await res.arrayBuffer();
-            setReaderDoc({ data: new Uint8Array(buffer), fileName: name });
+            const data = new Uint8Array(buffer);
+            setReaderDoc({ data, fileName: name });
           } catch (e) {
-            const sample = await createSamplePdf(name.replace(/\.pdf$/, ''), 2);
-            setReaderDoc({ data: sample.data, fileName: name });
+            alert('Could not open document in viewer.');
           }
         }}
       />

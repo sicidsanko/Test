@@ -627,17 +627,8 @@ export const MobiPdfReader: React.FC<MobiPdfReaderProps> = ({
           )}
         </div>
 
-        {/* Quick Tools Shortcuts */}
+        {/* Quick Tools Shortcuts (Version 1 Only) */}
         <div className="hidden sm:flex items-center space-x-1 border-l border-stone-300 dark:border-stone-700 pl-3 shrink-0">
-          {onOpenEditor && (
-            <button
-              onClick={onOpenEditor}
-              className="flex items-center space-x-1 px-2 py-1 rounded-lg text-stone-600 dark:text-stone-300 hover:bg-stone-200 dark:hover:bg-stone-800 cursor-pointer"
-            >
-              <Edit3 size={13} />
-              <span className="text-[11px]">Edit</span>
-            </button>
-          )}
           {onOpenFillSign && (
             <button
               onClick={onOpenFillSign}
@@ -656,22 +647,6 @@ export const MobiPdfReader: React.FC<MobiPdfReaderProps> = ({
               <span className="text-[11px]">Organize</span>
             </button>
           )}
-          {onOpenOcr && (
-            <button
-              onClick={onOpenOcr}
-              className="flex items-center space-x-1 px-2 py-1 rounded-lg text-stone-600 dark:text-stone-300 hover:bg-stone-200 dark:hover:bg-stone-800 cursor-pointer"
-            >
-              <ScanText size={13} />
-              <span className="text-[11px]">OCR</span>
-            </button>
-          )}
-          <button
-            onClick={handleNativePrint}
-            className="p-1.5 rounded-lg text-stone-600 dark:text-stone-300 hover:bg-stone-200 dark:hover:bg-stone-800 cursor-pointer"
-            title="Print Document"
-          >
-            <Printer size={14} />
-          </button>
         </div>
       </div>
 

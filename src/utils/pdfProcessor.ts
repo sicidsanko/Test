@@ -14,7 +14,6 @@ import {
 } from '../types/pdf';
 import { parsePageRanges, formatPageNumber } from './pdfEngineLogic';
 
-// Configure local PDF.js worker path (bundled locally, no CDN)
 if (typeof window !== 'undefined') {
   pdfjsLib.GlobalWorkerOptions.workerSrc = '/workers/pdf.worker.min.mjs';
 }
@@ -32,9 +31,13 @@ export interface ProcessResult {
 
 /**
  * 1. Merge multiple PDFs into a single document using pdf-lib.
+ * Renamed output to Merged_<date>.pdf.
  */
-export async function mergePdfs(files: LoadedFile[], outputName = 'merged_document.pdf'): Promise<ProcessResult> {
+export async function mergePdfs(files: LoadedFile[], outputName?: string): Promise<ProcessResult> {
   if (files.length === 0) throw new Error('At least one PDF file is required to merge.');
+
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const finalOutputName = outputName || `Merged_${dateStr}.pdf`;
 
   const mergedDoc = await PDFDocument.create();
 
@@ -50,7 +53,7 @@ export async function mergePdfs(files: LoadedFile[], outputName = 'merged_docume
 
   return {
     data: pdfBytes,
-    fileName: outputName,
+    fileName: finalOutputName,
     pageCount: mergedDoc.getPageCount(),
     previewUrl,
     size: pdfBytes.byteLength,
@@ -58,48 +61,79 @@ export async function mergePdfs(files: LoadedFile[], outputName = 'merged_docume
 }
 
 /**
- * 2. Split PDF by page range or extract pages.
+ * 2. Split PDF producing multiple files:
+ * - "Ranges": one PDF per range (e.g. "1-3, 4-6")
+ * - "every N pages": a PDF for each chunk of N pages
+ * - "all pages": one PDF per page
  */
+export async function splitPdfMulti(
+  file: LoadedFile,
+  options: SplitOptions
+): Promise<ProcessResult[]> {
+  const srcDoc = await PDFDocument.load(file.data);
+  const totalPages = srcDoc.getPageCount();
+  const results: ProcessResult[] = [];
+  const baseName = file.name.replace(/\.pdf$/, '');
+
+  let groups: number[][] = [];
+
+  if (options.mode === 'ranges') {
+    const parts = (options.rangeString || '').split(',');
+    for (const part of parts) {
+      const trimmed = part.trim();
+      const indices = parsePageRanges(trimmed, totalPages);
+      if (indices.length > 0) {
+        groups.push(indices);
+      }
+    }
+    if (groups.length === 0) {
+      groups.push([0]);
+    }
+  } else if (options.mode === 'every_n') {
+    const n = Math.max(1, options.everyN || 1);
+    for (let i = 0; i < totalPages; i += n) {
+      const chunk: number[] = [];
+      for (let j = i; j < Math.min(i + n, totalPages); j++) {
+        chunk.push(j);
+      }
+      groups.push(chunk);
+    }
+  } else {
+    // all pages / extract_all
+    for (let i = 0; i < totalPages; i++) {
+      groups.push([i]);
+    }
+  }
+
+  for (let idx = 0; idx < groups.length; idx++) {
+    const indices = groups[idx];
+    const newDoc = await PDFDocument.create();
+    const copiedPages = await newDoc.copyPages(srcDoc, indices);
+    copiedPages.forEach(p => newDoc.addPage(p));
+
+    const pdfBytes = await newDoc.save();
+    const blob = new Blob([pdfBytes as unknown as BlobPart], { type: 'application/pdf' });
+    const previewUrl = URL.createObjectURL(blob);
+
+    results.push({
+      data: pdfBytes,
+      fileName: `${baseName}_part_${idx + 1}.pdf`,
+      pageCount: newDoc.getPageCount(),
+      previewUrl,
+      size: pdfBytes.byteLength,
+    });
+  }
+
+  return results;
+}
+
 export async function splitPdf(
   file: LoadedFile,
   options: SplitOptions,
   outputName = 'split_document.pdf'
 ): Promise<ProcessResult> {
-  const srcDoc = await PDFDocument.load(file.data);
-  const totalPages = srcDoc.getPageCount();
-  const splitDoc = await PDFDocument.create();
-
-  let targetIndices: number[] = [];
-
-  if (options.mode === 'ranges') {
-    targetIndices = parsePageRanges(options.rangeString, totalPages);
-    if (targetIndices.length === 0) {
-      targetIndices = [0]; // fallback
-    }
-  } else if (options.mode === 'every_n') {
-    const n = Math.max(1, options.everyN || 1);
-    for (let i = 0; i < totalPages; i += n) {
-      targetIndices.push(i);
-    }
-  } else {
-    // extract all
-    targetIndices = srcDoc.getPageIndices();
-  }
-
-  const copiedPages = await splitDoc.copyPages(srcDoc, targetIndices);
-  copiedPages.forEach(page => splitDoc.addPage(page));
-
-  const pdfBytes = await splitDoc.save();
-  const blob = new Blob([pdfBytes as unknown as BlobPart], { type: 'application/pdf' });
-  const previewUrl = URL.createObjectURL(blob);
-
-  return {
-    data: pdfBytes,
-    fileName: outputName,
-    pageCount: splitDoc.getPageCount(),
-    previewUrl,
-    size: pdfBytes.byteLength,
-  };
+  const multi = await splitPdfMulti(file, options);
+  return multi[0];
 }
 
 /**
@@ -107,7 +141,7 @@ export async function splitPdf(
  */
 export async function removePages(
   file: LoadedFile,
-  pagesToRemove: number[], // 0-indexed
+  pagesToRemove: number[],
   outputName = 'pages_removed.pdf'
 ): Promise<ProcessResult> {
   const srcDoc = await PDFDocument.load(file.data);
@@ -144,7 +178,7 @@ export async function removePages(
 }
 
 /**
- * 4. Rotate pages (90, 180, 270 degrees).
+ * 4. Rotate pages.
  */
 export async function rotatePdf(
   file: LoadedFile,
@@ -350,19 +384,62 @@ export async function imagesToPdf(
 }
 
 /**
- * 8. Compress PDF (optimize object streams & rebuild).
+ * 8. Compress PDF:
+ * - Low: re-save with object streams.
+ * - Recommended: render each page with pdfjs-dist at 150 DPI, save as JPEG quality 0.7, and rebuild PDF.
+ * - Extreme: 100 DPI, quality 0.5.
+ * Keeps original if result is bigger.
  */
 export async function compressPdf(
   file: LoadedFile,
   level: 'low' | 'recommended' | 'extreme',
   outputName = 'compressed_document.pdf'
 ): Promise<ProcessResult> {
+  const originalSize = file.data.byteLength;
   const srcDoc = await PDFDocument.load(file.data);
+  let pdfBytes: Uint8Array;
 
-  const pdfBytes = await srcDoc.save({
-    useObjectStreams: true,
-    addDefaultPage: false,
-  });
+  if (level === 'low') {
+    pdfBytes = await srcDoc.save({ useObjectStreams: true });
+  } else {
+    const dpi = level === 'recommended' ? 150 : 100;
+    const quality = level === 'recommended' ? 0.7 : 0.5;
+    const scale = dpi / 72;
+
+    const loadingTask = pdfjsLib.getDocument({ data: file.data });
+    const pdf = await loadingTask.promise;
+    const numPages = pdf.numPages;
+
+    const newDoc = new jsPDF({
+      orientation: 'p',
+      unit: 'pt',
+      format: 'a4',
+    });
+
+    for (let i = 1; i <= numPages; i++) {
+      if (i > 1) newDoc.addPage('a4', 'p');
+      const page = await pdf.getPage(i);
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d')!;
+      await page.render({ canvasContext: ctx, viewport, canvas }).promise;
+
+      const imgData = canvas.toDataURL('image/jpeg', quality);
+      const pageWidth = newDoc.internal.pageSize.getWidth();
+      const pageHeight = newDoc.internal.pageSize.getHeight();
+      newDoc.addImage(imgData, 'JPEG', 0, 0, pageWidth, pageHeight, undefined, 'FAST');
+    }
+
+    const arrayBuffer = newDoc.output('arraybuffer');
+    pdfBytes = new Uint8Array(arrayBuffer);
+  }
+
+  // Keep original if result is bigger
+  if (pdfBytes.byteLength >= originalSize) {
+    pdfBytes = file.data;
+  }
 
   const blob = new Blob([pdfBytes as unknown as BlobPart], { type: 'application/pdf' });
   const previewUrl = URL.createObjectURL(blob);
@@ -377,7 +454,7 @@ export async function compressPdf(
 }
 
 /**
- * 9. Password Protect PDF using @cantoo/pdf-lib (supports standard encryption).
+ * 9. Password Protect PDF.
  */
 export async function protectPdfWithPassword(
   file: LoadedFile,
@@ -386,7 +463,6 @@ export async function protectPdfWithPassword(
 ): Promise<ProcessResult> {
   const doc = await CantooPDFDocument.load(file.data);
 
-  // Apply password encryption
   doc.encrypt({
     userPassword: userPassword,
     ownerPassword: userPassword + '_owner',
@@ -415,19 +491,17 @@ export async function protectPdfWithPassword(
 }
 
 /**
- * 10. Unlock PDF using @cantoo/pdf-lib.
+ * 10. Unlock PDF.
  */
 export async function unlockPdfWithPassword(
   file: LoadedFile,
   password: string,
   outputName = 'unlocked_document.pdf'
 ): Promise<ProcessResult> {
-  // Load with password
   const doc = await CantooPDFDocument.load(file.data, {
     password: password,
   } as any);
 
-  // Save unencrypted
   const pdfBytes = await doc.save();
   const blob = new Blob([pdfBytes as unknown as BlobPart], { type: 'application/pdf' });
   const previewUrl = URL.createObjectURL(blob);
@@ -442,7 +516,7 @@ export async function unlockPdfWithPassword(
 }
 
 /**
- * 11. Sign PDF: stamp drawn PNG signature onto target page.
+ * 11. Sign PDF.
  */
 export async function signPdf(
   file: LoadedFile,
@@ -509,7 +583,7 @@ export async function redactPdf(
 }
 
 /**
- * 13. Perform Offline OCR using Tesseract.js bundled locally.
+ * 13. Perform Offline OCR using Tesseract.js.
  */
 export async function performOfflineOcr(
   imageOrCanvas: string | HTMLCanvasElement,

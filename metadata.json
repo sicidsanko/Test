@@ -1,0 +1,6 @@
+{
+  "name": "iLovePDF Android Studio & Suite",
+  "description": "Native Android PDF Suite in Jetpack Compose (Material 3) with full offline PDF engine, code generator, and interactive tool simulator.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
